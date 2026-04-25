@@ -35,7 +35,8 @@ Tick items off `README.md`'s checklist as scripts land. Current state:
 
 - [x] `ocr.py` — searchable text via ocrmypdf, skips pages that already have text
 - [x] `pagenumber.py` — sequential page numbers top-centre via reportlab + pypdf
-- [ ] bookmarks per document/exhibit
+- [x] `bookmark.py` — nested bookmarks from a sidecar TOML, with strict page-order validation
+- [x] `detect.py` — index-driven auto-generation of a draft bookmark TOML (always review)
 - [ ] hyperlinked index
 - [ ] full assembler (combines all of the above into one command)
 - [ ] compliance checker (verifies a PDF meets all PD-72 requirements)
