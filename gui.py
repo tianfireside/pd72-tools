@@ -1,20 +1,19 @@
 """
 Desktop GUI for the PD-72 build pipeline.
 
-Slice 2: foundation window + per-exhibit review.
-
-Drop a PDF (or use File -> Open). The GUI auto-runs OCR and page-numbering
-if needed (in a worker thread), then runs detect() to find every affidavit
-exhibit. The right pane then walks the user one card at a time through
-each exhibit: jumps the PDF preview to the slot page, lets them confirm
-or correct the page and the title.
-
-Save (-> bookmark + hyperlink) lands in the next slice.
+Drop a PDF (or use File -> Open). The GUI auto-runs OCR and page numbering
+in a worker thread, then runs detect() to find every affidavit exhibit.
+The right pane walks the user one card at a time through each exhibit,
+jumping the PDF preview to the slot page so they can confirm or correct
+the page and title. The final Save step writes a TOML, runs bookmark.py
++ hyperlink.py, and produces the PD-72-compliant final PDF.
 
 Run: python gui.py
 """
 
+import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -30,7 +29,9 @@ from PySide6.QtWidgets import (
 )
 from pypdf import PdfReader
 
-from detect import detect
+from bookmark import add_bookmarks
+from detect import _drop_unfilled, detect, emit_toml
+from hyperlink import add_hyperlinks
 from ocr import ocr_pdf
 from pagenumber import add_page_numbers
 
@@ -96,7 +97,7 @@ class _Preprocessor(QObject):
 
 class _Detector(QObject):
     """Background worker: runs detect() on the prepared PDF."""
-    finished = Signal(object)  # tuple (bookmarks, warnings, n_pages)
+    finished = Signal(object)  # tuple (bookmarks, index_pages, warnings, n_pages)
     failed = Signal(str)
 
     def __init__(self, pdf_path: Path) -> None:
@@ -105,9 +106,47 @@ class _Detector(QObject):
 
     def run(self) -> None:
         try:
-            bookmarks, _index_pages, warnings, _ctx = detect(self._pdf_path)
+            bookmarks, index_pages, warnings, _ctx = detect(self._pdf_path)
             n_pages = len(PdfReader(str(self._pdf_path)).pages)
-            self.finished.emit((bookmarks, warnings, n_pages))
+            self.finished.emit((bookmarks, index_pages, warnings, n_pages))
+        except Exception as e:
+            self.failed.emit(f"{type(e).__name__}: {e}")
+
+
+class _Saver(QObject):
+    """Background worker: TOML -> bookmark.py -> hyperlink.py."""
+    progress = Signal(str)
+    finished = Signal(Path)  # final PDF path
+    failed = Signal(str)
+
+    def __init__(
+        self,
+        bookmarks: list[dict],
+        index_pages: list[int],
+        prepared_pdf: Path,
+    ) -> None:
+        super().__init__()
+        self._bookmarks = bookmarks
+        self._index_pages = index_pages
+        self._prepared_pdf = prepared_pdf
+
+    def run(self) -> None:
+        try:
+            cleaned = _drop_unfilled(self._bookmarks)
+            toml_path = self._prepared_pdf.with_suffix(".bookmarks.toml")
+            self.progress.emit(f"Writing {toml_path.name}...")
+            toml_text = emit_toml(
+                cleaned, [], self._prepared_pdf,
+                index_pages=self._index_pages, draft=False,
+            )
+            toml_path.write_text(toml_text, encoding="utf-8")
+
+            self.progress.emit("Adding bookmarks...")
+            bookmarked = add_bookmarks(str(self._prepared_pdf), str(toml_path))
+
+            self.progress.emit("Adding hyperlinks...")
+            final = add_hyperlinks(str(bookmarked), str(toml_path))
+            self.finished.emit(final)
         except Exception as e:
             self.failed.emit(f"{type(e).__name__}: {e}")
 
@@ -155,6 +194,12 @@ class MainWindow(QMainWindow):
         self._tasks: list[dict] = []
         self._task_idx = 0
         self._n_pages = 0
+        # Held for the Save step — the bookmarks dict is the in-memory model
+        # the review cards mutate, prepared_pdf is what we hand to bookmark.py.
+        self._bookmarks: list[dict] = []
+        self._index_pages: list[int] = []
+        self._prepared_pdf: Path | None = None
+        self._final_pdf: Path | None = None
         self._build_ui()
         self._build_menu()
 
@@ -282,13 +327,30 @@ class MainWindow(QMainWindow):
         w = QWidget(self)
         layout = QVBoxLayout(w)
         layout.setContentsMargins(24, 24, 24, 24)
+        layout.setSpacing(12)
+
         self._done_label = QLabel("", w)
         self._done_label.setWordWrap(True)
         df = self._done_label.font()
         df.setPointSize(12)
         self._done_label.setFont(df)
         layout.addWidget(self._done_label)
+
         layout.addStretch(1)
+
+        self._save_button = QPushButton("Save final PDF", w)
+        self._save_button.setMinimumHeight(44)
+        sf = self._save_button.font()
+        sf.setPointSize(12)
+        sf.setBold(True)
+        self._save_button.setFont(sf)
+        self._save_button.clicked.connect(self._on_save_click)
+        layout.addWidget(self._save_button)
+
+        self._open_folder_button = QPushButton("Open folder", w)
+        self._open_folder_button.clicked.connect(self._on_open_folder)
+        self._open_folder_button.hide()
+        layout.addWidget(self._open_folder_button)
         return w
 
     def _build_menu(self) -> None:
@@ -355,6 +417,7 @@ class MainWindow(QMainWindow):
             self._reset_open_button()
             return
 
+        self._prepared_pdf = processed
         self._n_pages = self._pdf_doc.pageCount()
         self.setWindowTitle(f"PD-72 Builder - {processed.name}")
         self.statusBar().showMessage(
@@ -392,15 +455,19 @@ class MainWindow(QMainWindow):
     # ---- detect / review ----
 
     def _on_detect_done(self, payload: tuple) -> None:
-        bookmarks, warnings, n_pages = payload
+        bookmarks, index_pages, warnings, n_pages = payload
         self._n_pages = n_pages
+        self._bookmarks = bookmarks
+        self._index_pages = index_pages
         self._tasks = build_review_tasks(bookmarks)
 
         if not self._tasks:
+            # No exhibits to review, but the bookmarks tree may still be
+            # worth saving (e.g. just a NOA + standalone documents) — let
+            # the Save button decide.
             self._show_done(
                 "No affidavit exhibits were detected.\n\n"
-                "Either this isn't an application record, or detect couldn't "
-                "find an index page. Save / build is coming in the next slice."
+                "If the document tabs above are correct you can still save."
             )
             return
 
@@ -507,14 +574,80 @@ class MainWindow(QMainWindow):
             self._show_done(
                 f"Review complete - {kept} exhibit(s) confirmed, "
                 f"{dropped} dropped.\n\n"
-                "Save (-> bookmark + hyperlink) is coming in the next slice."
+                "Click Save to add bookmarks and hyperlinks."
             )
             return
         self._show_current_task()
 
     def _show_done(self, msg: str) -> None:
         self._done_label.setText(msg)
+        self._save_button.setEnabled(True)
+        self._save_button.setText("Save final PDF")
+        self._save_button.show()
+        self._open_folder_button.hide()
+        self._final_pdf = None
         self._right_stack.setCurrentIndex(2)
+
+    # ---- save (bookmark + hyperlink) ----
+
+    def _on_save_click(self) -> None:
+        if not self._prepared_pdf or not self._bookmarks:
+            self.statusBar().showMessage("Nothing to save.", 5000)
+            return
+        self._save_button.setEnabled(False)
+        self._save_button.setText("Saving...")
+        self.statusBar().showMessage("Saving...")
+
+        self._save_thread = QThread(self)
+        self._save_worker = _Saver(
+            self._bookmarks, self._index_pages, self._prepared_pdf
+        )
+        self._save_worker.moveToThread(self._save_thread)
+        self._save_thread.started.connect(self._save_worker.run)
+        self._save_worker.progress.connect(
+            lambda msg: self.statusBar().showMessage(msg)
+        )
+        self._save_worker.finished.connect(self._on_save_done)
+        self._save_worker.failed.connect(self._on_save_failed)
+        self._save_worker.finished.connect(self._save_thread.quit)
+        self._save_worker.failed.connect(self._save_thread.quit)
+        self._save_thread.finished.connect(self._save_thread.deleteLater)
+        self._save_thread.start()
+
+    def _on_save_done(self, final: Path) -> None:
+        self._final_pdf = final
+        size_mb = final.stat().st_size / 1_000_000
+        self._done_label.setText(
+            f"Saved.\n\n{final.name}\n({size_mb:.1f} MB)\n\n"
+            "Open it in Acrobat to verify the bookmarks and links, then "
+            "use compliance.py to confirm PD-72 compliance."
+        )
+        self.statusBar().showMessage(f"Saved {final.name}", 8000)
+        self._save_button.hide()
+        self._open_folder_button.show()
+        # Auto-load the final PDF into the preview so the user can spot-check
+        # immediately without leaving the app.
+        if self._pdf_doc.load(str(final)) == QPdfDocument.Error.None_:
+            self.setWindowTitle(f"PD-72 Builder - {final.name}")
+
+    def _on_save_failed(self, msg: str) -> None:
+        self._done_label.setText(
+            f"Save failed:\n\n{msg}\n\n"
+            "The bookmarks TOML was written, so you can re-run "
+            "bookmark.py + hyperlink.py from the command line."
+        )
+        self.statusBar().showMessage(f"Save failed - {msg}", 12000)
+        self._save_button.setEnabled(True)
+        self._save_button.setText("Try save again")
+
+    def _on_open_folder(self) -> None:
+        if not self._final_pdf:
+            return
+        # Open the containing folder with the final PDF preselected.
+        try:
+            subprocess.Popen(["explorer", "/select,", str(self._final_pdf)])
+        except OSError:
+            os.startfile(str(self._final_pdf.parent))
 
     def _jump_to_pdf_page(self, page_1indexed: int) -> None:
         """Scroll the preview so `page_1indexed` is the visible page."""
