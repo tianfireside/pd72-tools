@@ -53,18 +53,41 @@ python detect.py input.pdf [output.toml]
 Output defaults to `input.bookmarks.draft.toml`. **Always review** before
 renaming to `.bookmarks.toml` and passing to `bookmark.py`.
 
+### `hyperlink.py` — Add clickable index hyperlinks
+
+Reads the bookmarks TOML and stamps a `/Link` annotation on each index row,
+pointing to the bookmarked target page. Uses pdfplumber for line-level bbox
+detection. Idempotent — wipes existing link annotations on the index page
+first.
+
+```
+python hyperlink.py input.pdf [config.toml] [output.pdf]
+```
+
+### `build.py` — Run the full pipeline
+
+Canonical entry point for the bookmark + link half of the pipeline. Runs
+`detect` → interactive review → `bookmark` → `hyperlink` in one shot,
+regenerating the TOML from the current PDF every time so it cannot drift.
+The standalone scripts remain callable for debugging; bypassing `build.py`
+reintroduces the drift risk it exists to prevent.
+
+```
+python build.py input_paged.pdf [output.pdf]
+```
+
 ## PD-72 compliance checklist
 
 - [x] Searchable text (OCR) — `ocr.py`
 - [x] Page numbers top-centre, sequential — `pagenumber.py`
 - [x] Bookmarks per document and exhibit — `bookmark.py` (+ `detect.py` for draft)
-- [ ] Hyperlinked index
+- [x] Hyperlinked index — `hyperlink.py`
 - [ ] No password protection
 - [ ] Under 50 MB
 
 ## Setup
 
 ```
-pip install ocrmypdf pypdf reportlab
+pip install ocrmypdf pypdf reportlab pdfplumber
 winget install UB-Mannheim.TesseractOCR
 ```

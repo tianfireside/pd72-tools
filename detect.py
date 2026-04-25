@@ -38,9 +38,12 @@ from pypdf import PdfReader
 RE_AFFIDAVIT_HEADER = re.compile(r"\bAFFIDAVIT\s*\[Rule", re.IGNORECASE)
 RE_NOA_HEADER = re.compile(r"NOTICE\s+OF\s+APPLICATION\s*\[?\s*Rule", re.IGNORECASE)
 
-# BC standard exhibit stamp. OCR sometimes runs the words together
-# ("ThisisExhibit"), so allow zero-or-more whitespace between them.
-RE_EXHIBIT_COVER = re.compile(r"this\s*is\s*exhibit", re.IGNORECASE)
+# BC standard exhibit stamp. OCR damage seen in real records:
+#   - words run together ("ThisisExhibit") -> allow zero-or-more whitespace
+#   - trailing "t" of "Exhibit" clipped by stamp ink ("This is Exhibi")
+# The 7-letter prefix "exhibi" is still distinctive — no English phrase
+# matches it accidentally.
+RE_EXHIBIT_COVER = re.compile(r"this\s*is\s*exhibi", re.IGNORECASE)
 
 # Index page header. The "TAB DOCUMENT DATE" column heading is highly
 # distinctive and rarely appears outside an actual index.
@@ -370,12 +373,38 @@ def find_exhibit_slots(
     internal exhibit covers must NOT be mistaken for the parent's slots.
     We peek at the nested affidavit's body to count its exhibits, then
     skip that many cover pages before resuming the search.
+
+    Slots carry a `verify` flag with a `reason` when confidence is low:
+      - `nested_skip`: picked AFTER skipping past a nested affidavit's own
+        cover pages (the nested-body count we trusted may be wrong).
+      - `dense_window`: the section has many more cover pages than body
+        references — usually means at least one "exhibit" is itself a
+        packet (affidavit + sub-exhibits) we can't reliably navigate. Every
+        slot in such a section is suspect.
+    The interactive review surfaces verify slots for confirmation.
     """
+    # Pre-scan: count cover pages in the window. If it substantially exceeds
+    # the number of body refs, this section contains sub-document complexity
+    # (nested affidavits with their own exhibits, document packets, etc.)
+    # that the simple cover-counting walk cannot resolve correctly.
+    n_covers_in_window = sum(
+        1 for i in range(body_end + 1, section_end + 1)
+        if pages_info[i - 1]["type"] == "exhibit_cover"
+    )
+    dense = n_covers_in_window > n_needed
+
     slots: list[dict] = []
     p = body_end + 1
+    after_nested: dict | None = None
     while p <= section_end and len(slots) < n_needed:
         if p in nested_pages:
-            slots.append({"page": p, "kind": "nested"})
+            nested_slot: dict = {"page": p, "kind": "nested"}
+            if dense:
+                nested_slot["verify"] = True
+                nested_slot["reason"] = "dense_window"
+                nested_slot["n_covers"] = n_covers_in_window
+                nested_slot["n_refs"] = n_needed
+            slots.append(nested_slot)
             # Walk the nested affidavit's body until its first exhibit cover.
             q = p + 1
             while q <= section_end and pages_info[q - 1]["type"] != "exhibit_cover":
@@ -388,10 +417,21 @@ def find_exhibit_slots(
                 if pages_info[q - 1]["type"] == "exhibit_cover":
                     skipped += 1
                 q += 1
+            after_nested = {"nested_at": p, "n_skipped": skipped}
             p = q
             continue
         if pages_info[p - 1]["type"] == "exhibit_cover":
-            slots.append({"page": p, "kind": "cover"})
+            slot = {"page": p, "kind": "cover"}
+            if after_nested is not None:
+                slot["verify"] = True
+                slot["reason"] = "nested_skip"
+                slot.update(after_nested)
+            elif dense:
+                slot["verify"] = True
+                slot["reason"] = "dense_window"
+                slot["n_covers"] = n_covers_in_window
+                slot["n_refs"] = n_needed
+            slots.append(slot)
         p += 1
     return slots
 
@@ -434,35 +474,53 @@ def build_affidavit_exhibits(
                 "_parent": label,
             })
             continue
-        exhibits.append({"title": ex_title, "page": slot["page"]})
+        ex = {"title": ex_title, "page": slot["page"]}
+        if slot.get("verify"):
+            ex["_verify"] = True
+            ex["_reason"] = slot.get("reason", "nested_skip")
+            ex["_parent"] = label
+            if slot["reason"] == "nested_skip":
+                ex["_nested_at"] = slot["nested_at"]
+                ex["_n_skipped"] = slot["n_skipped"]
+            else:
+                ex["_n_covers"] = slot.get("n_covers")
+                ex["_n_refs"] = slot.get("n_refs")
+        exhibits.append(ex)
     return exhibits
 
 
 # ---- main ----
 
 
-def detect(pdf_path: Path) -> tuple[list[dict], list[str]]:
+def detect(pdf_path: Path) -> tuple[list[dict], list[int], list[str]]:
+    """Returns (bookmarks, index_pages, warnings).
+
+    index_pages is the list of 1-indexed PDF pages that contain index rows.
+    Persisted in the TOML so hyperlink.py knows where to stamp link
+    annotations without re-detecting.
+    """
     reader = PdfReader(str(pdf_path))
     pages = [(p.extract_text() or "") for p in reader.pages]
     pages_info = classify_pages(pages)
     warnings: list[str] = []
 
-    index_pages = [p for p in pages_info if p["type"] == "index"]
-    if not index_pages:
+    index_page_infos = [p for p in pages_info if p["type"] == "index"]
+    if not index_page_infos:
         warnings.append(
             "No index page detected. detect.py needs an index to anchor the top-level "
             "structure. Add one (PD-72 requires it anyway), or write the TOML by hand."
         )
-        return [], warnings
+        return [], [], warnings
 
-    index_text = pages[index_pages[0]["page"] - 1]
+    index_pages = [p["page"] for p in index_page_infos]
+    index_text = pages[index_pages[0] - 1]
     entries = parse_index(index_text)
     if not entries:
         warnings.append(
-            f"Index page found at p{index_pages[0]['page']} but no rows parsed. "
+            f"Index page found at p{index_pages[0]} but no rows parsed. "
             f"Check the index format; expected 'TAB DOCUMENT DATE' table layout."
         )
-        return [], warnings
+        return [], index_pages, warnings
 
     nested_pages = match_index_to_pages(entries, pages, pages_info)
 
@@ -492,13 +550,14 @@ def detect(pdf_path: Path) -> tuple[list[dict], list[str]]:
             )
         bookmarks.append(bookmark)
 
-    return bookmarks, warnings
+    return bookmarks, index_pages, warnings
 
 
 def emit_toml(
     bookmarks: list[dict],
     warnings: list[str],
     pdf_path: Path,
+    index_pages: list[int] | None = None,
     draft: bool = True,
 ) -> str:
     """Render bookmarks to TOML.
@@ -522,6 +581,11 @@ def emit_toml(
         lines.append("# WARNINGS:")
         for w in warnings:
             lines.append(f"#   - {w}")
+        lines.append("")
+
+    if index_pages:
+        # Persist for hyperlink.py — it needs to know which page to stamp links onto.
+        lines.append(f"index_pages = {index_pages}")
         lines.append("")
 
     for b in bookmarks:
@@ -581,6 +645,32 @@ def collect_unknowns(bookmarks: list[dict]) -> list[dict]:
     return unknowns
 
 
+def collect_verifications(bookmarks: list[dict]) -> list[dict]:
+    """Gather exhibits whose page was picked after navigating a nested affidavit.
+
+    These slots have a known page (detect's best guess) but lower confidence —
+    once we've trusted a nested-body parse to skip past internal cover sheets,
+    the next slot is one OCR error away from being wrong. The interactive
+    review surfaces these for a quick yes/no.
+    """
+    out: list[dict] = []
+    for b in bookmarks:
+        for ex in b.get("exhibit", []):
+            if ex.get("_verify") and ex.get("page") is not None:
+                out.append({
+                    "ref": ex,
+                    "title": ex["title"],
+                    "parent": ex.get("_parent") or b["title"],
+                    "page": ex["page"],
+                    "reason": ex.get("_reason", "nested_skip"),
+                    "nested_at": ex.get("_nested_at"),
+                    "n_skipped": ex.get("_n_skipped"),
+                    "n_covers": ex.get("_n_covers"),
+                    "n_refs": ex.get("_n_refs"),
+                })
+    return out
+
+
 def _read_page(prompt: str, n_pages: int, hint_lo: int | None, hint_hi: int | None) -> int | None:
     """Prompt until the user gives a valid page number, or chooses to leave out.
 
@@ -613,45 +703,108 @@ def _read_page(prompt: str, n_pages: int, hint_lo: int | None, hint_hi: int | No
         return page
 
 
+def _confirm_or_change_page(prompt: str, default: int, n_pages: int) -> int | None:
+    """Prompt for verification of an auto-picked page. Enter accepts the default."""
+    page_re = re.compile(r"^(?:p|page\s*)?(\d+)$", re.IGNORECASE)
+    while True:
+        raw = input(prompt).strip()
+        low = raw.lower()
+        if not raw:
+            return default
+        if low in ("out", "o", "skip", "none"):
+            confirm = input("    Leave this exhibit out? [y/N]: ").strip().lower()
+            if confirm == "y":
+                return None
+            continue
+        m = page_re.match(low)
+        if not m:
+            print("    Press Enter to confirm, type a page number, or 'out'.")
+            continue
+        page = int(m.group(1))
+        if page < 1 or page > n_pages:
+            print(f"    The PDF only has {n_pages} pages. Try again.")
+            continue
+        return page
+
+
 def interactive_resolve(
     bookmarks: list[dict], pdf_path: Path, n_pages: int
 ) -> list[dict]:
-    """Walk every unknown, prompt the user, fill in pages, drop any left out."""
+    """Two passes: (1) fill in unknowns, (2) verify nested-affidavit slots."""
     unknowns = collect_unknowns(bookmarks)
-    if not unknowns:
-        return _drop_unfilled(bookmarks)
+    pdf_opened = False
 
-    print()
-    print("=" * 60)
-    print(f"We need help with {len(unknowns)} missing page(s).")
-    print("Opening the PDF in your default viewer — keep it visible.")
-    print("=" * 60)
-    try:
-        os.startfile(str(pdf_path))
-    except (OSError, AttributeError):
-        # not Windows or no associated viewer; user can open manually
-        print(f"(Couldn't auto-open. Please open {pdf_path.name} yourself.)")
+    def _open_pdf_once() -> None:
+        nonlocal pdf_opened
+        if pdf_opened:
+            return
+        try:
+            os.startfile(str(pdf_path))
+            pdf_opened = True
+        except (OSError, AttributeError):
+            print(f"(Couldn't auto-open. Please open {pdf_path.name} yourself.)")
+            pdf_opened = True
 
-    for i, unk in enumerate(unknowns, 1):
+    if unknowns:
         print()
-        print(f"--- Question {i} of {len(unknowns)} ---")
-        if unk["parent"]:
-            print(f"  We're looking for {unk['kind']} in {unk['parent']}.")
-        else:
-            print(f"  We're looking for {unk['kind']}: {unk['title']}.")
-        if unk["hint_lo"] and unk["hint_hi"]:
-            if unk["hint_lo"] == unk["hint_hi"]:
-                print(f"  It should be on page {unk['hint_lo']}.")
+        print("=" * 60)
+        print(f"We need help with {len(unknowns)} missing page(s).")
+        print("Opening the PDF in your default viewer — keep it visible.")
+        print("=" * 60)
+        _open_pdf_once()
+
+        for i, unk in enumerate(unknowns, 1):
+            print()
+            print(f"--- Question {i} of {len(unknowns)} ---")
+            if unk["parent"]:
+                print(f"  We're looking for {unk['kind']} in {unk['parent']}.")
             else:
-                print(f"  Look in the PDF between page {unk['hint_lo']} and page {unk['hint_hi']}.")
-                print(f"  It usually starts on a page with a stamp that says \"This is Exhibit ...\".")
-        page = _read_page(
-            "  Page number (or 'out' to leave out): ",
-            n_pages,
-            unk["hint_lo"],
-            unk["hint_hi"],
-        )
-        unk["ref"]["page"] = page
+                print(f"  We're looking for {unk['kind']}: {unk['title']}.")
+            if unk["hint_lo"] and unk["hint_hi"]:
+                if unk["hint_lo"] == unk["hint_hi"]:
+                    print(f"  It should be on page {unk['hint_lo']}.")
+                else:
+                    print(f"  Look in the PDF between page {unk['hint_lo']} and page {unk['hint_hi']}.")
+                    print(f"  It usually starts on a page with a stamp that says \"This is Exhibit ...\".")
+            page = _read_page(
+                "  Page number (or 'out' to leave out): ",
+                n_pages,
+                unk["hint_lo"],
+                unk["hint_hi"],
+            )
+            unk["ref"]["page"] = page
+
+    # Second pass: confirm slots picked after navigating a nested affidavit.
+    # Computed AFTER unknowns are resolved so the user sees the full picture.
+    verifies = collect_verifications(bookmarks)
+    if verifies:
+        print()
+        print("=" * 60)
+        print(f"{len(verifies)} exhibit(s) need a quick check.")
+        print("These are low-confidence picks - please confirm each page.")
+        print("=" * 60)
+        _open_pdf_once()
+
+        for i, v in enumerate(verifies, 1):
+            print()
+            print(f"--- Check {i} of {len(verifies)} ---")
+            print(f"  {v['parent']}")
+            print(f"  -> {v['title']}")
+            print(f"  I picked page {v['page']}.")
+            if v["reason"] == "nested_skip":
+                print(f"  Why suspect: skipped {v['n_skipped']} cover page(s) inside")
+                print(f"  a nested affidavit at p{v['nested_at']}.")
+            else:
+                print(f"  Why suspect: this section has {v['n_covers']} exhibit cover")
+                print(f"  pages but the body only references {v['n_refs']} exhibit(s) -")
+                print(f"  one of the exhibits is probably a packet (e.g. an affidavit")
+                print(f"  with its own exhibits) that I can't reliably navigate.")
+            page = _confirm_or_change_page(
+                f"  Press Enter to confirm p{v['page']}, type a different page, or 'out': ",
+                v["page"],
+                n_pages,
+            )
+            v["ref"]["page"] = page
 
     return _drop_unfilled(bookmarks)
 
@@ -684,13 +837,13 @@ if __name__ == "__main__":
     output_file = Path(args[1]) if len(args) > 1 else input_file.with_suffix(suffix)
 
     print(f"Scanning {input_file.name}...")
-    bookmarks, warnings = detect(input_file)
+    bookmarks, index_pages, warnings = detect(input_file)
     n_pages = len(PdfReader(str(input_file)).pages)
 
     if not batch:
         bookmarks = interactive_resolve(bookmarks, input_file, n_pages)
 
-    toml = emit_toml(bookmarks, warnings, input_file, draft=batch)
+    toml = emit_toml(bookmarks, warnings, input_file, index_pages=index_pages, draft=batch)
     output_file.write_text(toml, encoding="utf-8")
 
     n_top = sum(1 for b in bookmarks if b.get("page") is not None)

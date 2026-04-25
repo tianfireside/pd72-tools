@@ -37,8 +37,8 @@ Tick items off `README.md`'s checklist as scripts land. Current state:
 - [x] `pagenumber.py` — sequential page numbers top-centre via reportlab + pypdf
 - [x] `bookmark.py` — nested bookmarks from a sidecar TOML, with strict page-order validation
 - [x] `detect.py` — index-driven auto-generation of a draft bookmark TOML (always review)
-- [ ] hyperlinked index
-- [ ] full assembler (combines all of the above into one command)
+- [x] `hyperlink.py` — clickable index rows via pdfplumber bboxes + pypdf Link annotations
+- [x] `build.py` — orchestrates detect → review → bookmark → hyperlink so the TOML can't drift
 - [ ] compliance checker (verifies a PDF meets all PD-72 requirements)
 
 ## Stack
