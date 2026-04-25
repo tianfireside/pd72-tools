@@ -39,7 +39,7 @@ Tick items off `README.md`'s checklist as scripts land. Current state:
 - [x] `detect.py` — index-driven auto-generation of a draft bookmark TOML (always review)
 - [x] `hyperlink.py` — clickable index rows via pdfplumber bboxes + pypdf Link annotations
 - [x] `build.py` — orchestrates detect → review → bookmark → hyperlink so the TOML can't drift
-- [ ] compliance checker (verifies a PDF meets all PD-72 requirements)
+- [x] `compliance.py` — checks searchable, bookmarks, hyperlinks, page numbers, size, encryption, JS
 
 ## Stack
 

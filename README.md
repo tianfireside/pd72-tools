@@ -76,14 +76,24 @@ reintroduces the drift risk it exists to prevent.
 python build.py input_paged.pdf [output.pdf]
 ```
 
+### `compliance.py` — Verify a finished PDF against PD-72
+
+Runs every PD-72 requirement as an independent check and prints a per-check
+report. Exits 0 if all pass, 1 if any fail. Cover-page form check is
+intentionally skipped (form layouts vary too much per matter).
+
+```
+python compliance.py final.pdf
+```
+
 ## PD-72 compliance checklist
 
-- [x] Searchable text (OCR) — `ocr.py`
-- [x] Page numbers top-centre, sequential — `pagenumber.py`
+- [x] Searchable text (OCR) — `ocr.py` (verified by `compliance.py`)
+- [x] Page numbers top-centre, sequential — `pagenumber.py` (verified by `compliance.py`)
 - [x] Bookmarks per document and exhibit — `bookmark.py` (+ `detect.py` for draft)
-- [x] Hyperlinked index — `hyperlink.py`
-- [ ] No password protection
-- [ ] Under 50 MB
+- [x] Hyperlinked index — `hyperlink.py` (verified by `compliance.py`)
+- [x] No password protection — verified by `compliance.py`
+- [x] Under 50 MB — verified by `compliance.py`
 
 ## Setup
 
