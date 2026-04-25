@@ -40,6 +40,14 @@ Tick items off `README.md`'s checklist as scripts land. Current state:
 - [x] `hyperlink.py` — clickable index rows via pdfplumber bboxes + pypdf Link annotations
 - [x] `build.py` — orchestrates detect → review → bookmark → hyperlink so the TOML can't drift
 - [x] `compliance.py` — checks searchable, bookmarks, hyperlinks, page numbers, size, encryption, JS
+- [x] `gui.py` — PySide6 desktop app: drop a PDF -> auto OCR + page numbers -> per-exhibit review cards -> Save runs bookmark + hyperlink
+
+### GUI — next slices
+
+- [ ] **Compliance integration** — after Save, run `compliance.py` against the final PDF and surface the per-check report on the done page (green/red rows). User shouldn't have to drop into a terminal to verify.
+- [ ] **UI/UX polish pass** — the current GUI is functional but raw. Needs a once-over for spacing, fonts, button affordances, status-bar wording, and the empty-state when no exhibits are detected. Target persona is a 55-year-old legal assistant.
+
+The GUI is the primary entry point now — the standalone scripts stay callable but the assistant runs everything through `python gui.py`.
 
 ## Stack
 
