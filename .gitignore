@@ -1,3 +1,7 @@
 __pycache__/
 *.pyc
 .claude/
+
+# Never commit PDFs or bookmark TOMLs — these are real client matters.
+*.pdf
+*.bookmarks*.toml
