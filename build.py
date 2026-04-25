@@ -42,7 +42,7 @@ def build(input_path: str, output_path: str | None = None) -> Path:
 
     # 1. Detect — fresh scan of the current PDF, every time.
     print("[1/4] Scanning PDF for index, affidavits, and exhibits...")
-    bookmarks, index_pages, warnings = detect(input_file)
+    bookmarks, index_pages, warnings, ctx = detect(input_file)
     if not bookmarks:
         print("\nDetect found no bookmarks. Cannot continue:")
         for w in warnings:
@@ -55,10 +55,10 @@ def build(input_path: str, output_path: str | None = None) -> Path:
     )
     print(f"  Found {n_top} top-level bookmark(s), {n_unknown} need your input.")
 
-    # 2. Review — prompt for every unresolved page. Only path for human
-    #    correction; no manual TOML editing in the workflow.
+    # 2. Review — confirm every affidavit start and every exhibit (page +
+    #    title). Only path for human correction; no manual TOML editing.
     print("\n[2/4] Reviewing detected bookmarks...")
-    bookmarks = interactive_resolve(bookmarks, input_file, n_pages)
+    bookmarks = interactive_resolve(bookmarks, ctx, input_file, n_pages)
 
     # Persist the reviewed TOML next to the input as an audit artifact.
     # It's an OUTPUT of this run, not an input to the next — build.py
