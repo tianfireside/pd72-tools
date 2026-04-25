@@ -34,7 +34,7 @@ Structure: cover page → index (5 tabs) → notice of application → 3 affidav
 Tick items off `README.md`'s checklist as scripts land. Current state:
 
 - [x] `ocr.py` — searchable text via ocrmypdf, skips pages that already have text
-- [ ] page numbering top-centre
+- [x] `pagenumber.py` — sequential page numbers top-centre via reportlab + pypdf
 - [ ] bookmarks per document/exhibit
 - [ ] hyperlinked index
 - [ ] full assembler (combines all of the above into one command)
@@ -46,7 +46,7 @@ Tick items off `README.md`'s checklist as scripts land. Current state:
 - **ocrmypdf** for OCR (calls Tesseract under the hood)
 - **pypdf** for page-level edits, bookmarks, metadata
 - **pikepdf** when pypdf isn't enough (object-level PDF editing)
-- **reportlab** if we ever need to draw new content (page numbers, watermarks)
+- **reportlab** for drawing new content onto pages (page numbers, watermarks)
 
 Avoid heavier frameworks. These are short scripts, not a service.
 
