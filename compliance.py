@@ -172,44 +172,61 @@ def check_javascript(reader: PdfReader) -> tuple[bool, str, list[int]]:
 
 # ---- report ----
 
+_CHECKS_DEF = [
+    ("Searchable text",   "searchable"),
+    ("Bookmarks",         "bookmarks"),
+    ("Hyperlinked index", "hyperlinks"),
+    ("Page numbers",      "page_numbers"),
+    ("File size",         "size"),
+    ("No encryption",     "encryption"),
+    ("No JavaScript",     "javascript"),
+]
 
-def check_compliance(pdf_path: str | Path) -> bool:
-    """Run every check, print a report, return True iff all passed."""
+
+def run_checks(pdf_path: str | Path) -> list[tuple[str, bool, str, list[int]]]:
+    """Run all PD-72 checks and return (label, ok, summary, pages) for each."""
     path = Path(pdf_path)
     if not path.exists():
         raise FileNotFoundError(path)
 
     reader = PdfReader(str(path))
 
-    print(f"=== PD-72 Compliance Report ===")
-    print(f"File: {path.name}")
-    print()
+    dispatch = {
+        "searchable":   lambda: check_searchable(reader),
+        "bookmarks":    lambda: check_bookmarks(reader),
+        "hyperlinks":   lambda: check_hyperlinks(reader),
+        "page_numbers": lambda: check_page_numbers(path),
+        "size":         lambda: check_size(path),
+        "encryption":   lambda: check_encryption(reader),
+        "javascript":   lambda: check_javascript(reader),
+    }
 
-    checks = [
-        ("Searchable text",  lambda: check_searchable(reader)),
-        ("Bookmarks",        lambda: check_bookmarks(reader)),
-        ("Hyperlinked index", lambda: check_hyperlinks(reader)),
-        ("Page numbers",     lambda: check_page_numbers(path)),
-        ("File size",        lambda: check_size(path)),
-        ("No encryption",    lambda: check_encryption(reader)),
-        ("No JavaScript",    lambda: check_javascript(reader)),
-    ]
-
-    n_failed = 0
-    for label, fn in checks:
+    results: list[tuple[str, bool, str, list[int]]] = []
+    for label, key in _CHECKS_DEF:
         try:
-            ok, summary, pages = fn()
+            ok, summary, pages = dispatch[key]()
         except Exception as e:
             ok = False
             summary = f"check raised {type(e).__name__}: {e}"
             pages = []
+        results.append((label, ok, summary, pages))
+    return results
 
+
+def check_compliance(pdf_path: str | Path) -> bool:
+    """Run every check, print a report, return True iff all passed."""
+    path = Path(pdf_path)
+    print("=== PD-72 Compliance Report ===")
+    print(f"File: {path.name}")
+    print()
+
+    n_failed = 0
+    for label, ok, summary, pages in run_checks(path):
         tag = "[PASS]" if ok else "[FAIL]"
         print(f"{tag} {label}: {summary}")
         if not ok:
             n_failed += 1
             if pages:
-                # Show up to 20 page numbers, then a count for the rest.
                 shown = ", ".join(str(p) for p in pages[:20])
                 more = f" (+{len(pages) - 20} more)" if len(pages) > 20 else ""
                 print(f"         pages: {shown}{more}")

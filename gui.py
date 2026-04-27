@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
 from pypdf import PdfReader
 
 from bookmark import add_bookmarks
+from compliance import run_checks
 from detect import _drop_unfilled, detect, emit_toml
 from hyperlink import add_hyperlinks
 from ocr import ocr_pdf
@@ -113,6 +114,28 @@ class _Detector(QObject):
             self.failed.emit(f"{type(e).__name__}: {e}")
 
 
+class _ComplianceChecker(QObject):
+    """Background worker: runs compliance checks on the final PDF."""
+    finished = Signal(list)  # list of (label, ok, summary, pages)
+    failed = Signal(str)
+
+    def __init__(self, pdf_path: Path) -> None:
+        super().__init__()
+        self._pdf_path = pdf_path
+
+    def run(self) -> None:
+        try:
+            self.finished.emit(run_checks(self._pdf_path))
+        except Exception as e:
+            self.failed.emit(f"{type(e).__name__}: {e}")
+
+
+def _clean_output_name(prepared: Path) -> str:
+    """Strip OCR/paging suffixes to suggest a clean output filename."""
+    stem = re.sub(r"(_OCR_paged|_OCR|_paged)+$", "", prepared.stem, flags=re.IGNORECASE)
+    return stem + ".pdf"
+
+
 class _Saver(QObject):
     """Background worker: TOML -> bookmark.py -> hyperlink.py."""
     progress = Signal(str)
@@ -124,11 +147,13 @@ class _Saver(QObject):
         bookmarks: list[dict],
         index_pages: list[int],
         prepared_pdf: Path,
+        output_path: Path | None = None,
     ) -> None:
         super().__init__()
         self._bookmarks = bookmarks
         self._index_pages = index_pages
         self._prepared_pdf = prepared_pdf
+        self._output_path = output_path
 
     def run(self) -> None:
         try:
@@ -146,6 +171,11 @@ class _Saver(QObject):
 
             self.progress.emit("Adding hyperlinks...")
             final = add_hyperlinks(str(bookmarked), str(toml_path))
+
+            if self._output_path and self._output_path != final:
+                final.replace(self._output_path)
+                final = self._output_path
+
             self.finished.emit(final)
         except Exception as e:
             self.failed.emit(f"{type(e).__name__}: {e}")
@@ -335,6 +365,26 @@ class MainWindow(QMainWindow):
         df.setPointSize(12)
         self._done_label.setFont(df)
         layout.addWidget(self._done_label)
+
+        filename_row = QHBoxLayout()
+        filename_row.addWidget(QLabel("Save as:", w))
+        self._filename_edit = QLineEdit(w)
+        filename_row.addWidget(self._filename_edit)
+        self._filename_row_widget = QWidget(w)
+        self._filename_row_widget.setLayout(filename_row)
+        layout.addWidget(self._filename_row_widget)
+
+        self._compliance_label = QLabel("", w)
+        self._compliance_label.setStyleSheet("color: #666;")
+        self._compliance_label.hide()
+        layout.addWidget(self._compliance_label)
+
+        self._compliance_rows = QWidget(w)
+        self._comp_rows_layout = QVBoxLayout(self._compliance_rows)
+        self._comp_rows_layout.setContentsMargins(0, 0, 0, 0)
+        self._comp_rows_layout.setSpacing(3)
+        self._compliance_rows.hide()
+        layout.addWidget(self._compliance_rows)
 
         layout.addStretch(1)
 
@@ -586,6 +636,12 @@ class MainWindow(QMainWindow):
         self._save_button.show()
         self._open_folder_button.hide()
         self._final_pdf = None
+        self._compliance_label.hide()
+        self._compliance_rows.hide()
+        if self._prepared_pdf:
+            self._filename_edit.setText(_clean_output_name(self._prepared_pdf))
+        self._filename_edit.setEnabled(True)
+        self._filename_row_widget.show()
         self._right_stack.setCurrentIndex(2)
 
     # ---- save (bookmark + hyperlink) ----
@@ -594,13 +650,23 @@ class MainWindow(QMainWindow):
         if not self._prepared_pdf or not self._bookmarks:
             self.statusBar().showMessage("Nothing to save.", 5000)
             return
+
+        name = self._filename_edit.text().strip()
+        if not name:
+            name = _clean_output_name(self._prepared_pdf)
+        if not name.lower().endswith(".pdf"):
+            name += ".pdf"
+        output_path = self._prepared_pdf.parent / name
+
         self._save_button.setEnabled(False)
         self._save_button.setText("Saving...")
+        self._filename_edit.setEnabled(False)
         self.statusBar().showMessage("Saving...")
 
         self._save_thread = QThread(self)
         self._save_worker = _Saver(
-            self._bookmarks, self._index_pages, self._prepared_pdf
+            self._bookmarks, self._index_pages, self._prepared_pdf,
+            output_path=output_path,
         )
         self._save_worker.moveToThread(self._save_thread)
         self._save_thread.started.connect(self._save_worker.run)
@@ -617,18 +683,29 @@ class MainWindow(QMainWindow):
     def _on_save_done(self, final: Path) -> None:
         self._final_pdf = final
         size_mb = final.stat().st_size / 1_000_000
-        self._done_label.setText(
-            f"Saved.\n\n{final.name}\n({size_mb:.1f} MB)\n\n"
-            "Open it in Acrobat to verify the bookmarks and links, then "
-            "use compliance.py to confirm PD-72 compliance."
-        )
-        self.statusBar().showMessage(f"Saved {final.name}", 8000)
+        self._done_label.setText(f"Saved — {final.name} ({size_mb:.1f} MB)")
+        self.statusBar().showMessage(f"Saved {final.name}. Checking compliance...")
         self._save_button.hide()
+        self._filename_row_widget.hide()
         self._open_folder_button.show()
-        # Auto-load the final PDF into the preview so the user can spot-check
-        # immediately without leaving the app.
         if self._pdf_doc.load(str(final)) == QPdfDocument.Error.None_:
             self.setWindowTitle(f"PD-72 Builder - {final.name}")
+
+        self._compliance_label.setText("Checking PD-72 compliance...")
+        self._compliance_label.setStyleSheet("color: #666;")
+        self._compliance_label.show()
+        self._compliance_rows.hide()
+
+        self._comp_thread = QThread(self)
+        self._comp_worker = _ComplianceChecker(final)
+        self._comp_worker.moveToThread(self._comp_thread)
+        self._comp_thread.started.connect(self._comp_worker.run)
+        self._comp_worker.finished.connect(self._on_compliance_done)
+        self._comp_worker.failed.connect(self._on_compliance_failed)
+        self._comp_worker.finished.connect(self._comp_thread.quit)
+        self._comp_worker.failed.connect(self._comp_thread.quit)
+        self._comp_thread.finished.connect(self._comp_thread.deleteLater)
+        self._comp_thread.start()
 
     def _on_save_failed(self, msg: str) -> None:
         self._done_label.setText(
@@ -639,6 +716,52 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Save failed - {msg}", 12000)
         self._save_button.setEnabled(True)
         self._save_button.setText("Try save again")
+
+    def _on_compliance_done(self, results: list) -> None:
+        self._compliance_label.hide()
+
+        # Clear any rows from a previous run.
+        while self._comp_rows_layout.count():
+            item = self._comp_rows_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        n_failed = sum(1 for _, ok, _, _ in results if not ok)
+        header = QLabel(
+            "PD-72 Compliance: PASS" if n_failed == 0
+            else f"PD-72 Compliance: {n_failed} check(s) FAILED"
+        )
+        header.setStyleSheet(
+            "color: #1a7a1a; font-weight: bold;" if n_failed == 0
+            else "color: #b22222; font-weight: bold;"
+        )
+        self._comp_rows_layout.addWidget(header)
+
+        for label, ok, summary, pages in results:
+            text = f"{'✓' if ok else '✗'}  {label}: {summary}"
+            if not ok and pages:
+                shown = ", ".join(str(p) for p in pages[:10])
+                more = f" (+{len(pages) - 10} more)" if len(pages) > 10 else ""
+                text += f"\n    Pages: {shown}{more}"
+            row = QLabel(text)
+            row.setWordWrap(True)
+            row.setStyleSheet("color: #1a7a1a;" if ok else "color: #b22222;")
+            self._comp_rows_layout.addWidget(row)
+
+        self._compliance_rows.show()
+        if n_failed == 0:
+            self.statusBar().showMessage(
+                "Compliance check passed — all PD-72 requirements met.", 10000
+            )
+        else:
+            self.statusBar().showMessage(
+                f"Compliance: {n_failed} issue(s) found — see the panel.", 10000
+            )
+
+    def _on_compliance_failed(self, msg: str) -> None:
+        self._compliance_label.setText(f"Compliance check error: {msg}")
+        self._compliance_label.setStyleSheet("color: #b22222;")
+        self.statusBar().showMessage(f"Compliance check error - {msg}", 12000)
 
     def _on_open_folder(self) -> None:
         if not self._final_pdf:
