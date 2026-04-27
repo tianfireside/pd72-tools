@@ -34,10 +34,12 @@ Replace `detect.py`'s regex heuristics with Claude. The current accuracy is ~85-
 
 - [ ] **`anthropic_client.py`** — thin wrapper around the Anthropic SDK. Embeds the API key from a config file the installer drops. Sends with `cache_control` for prompt reuse. Caps at $20/month account-level (manual via Anthropic console).
 - [ ] **`detect_ai.py`** — sends per-page text + structural signals to Claude, asks for a JSON document map. Returns same shape as `detect.py`. Includes confidence scores per item.
+- [ ] **Model routing via "anything unusual?" prompt.** On the intro screen (next to the BCSC checkbox), an optional free-text field: _"Anything unusual about this record? (nested affidavits, sealed exhibits, multi-affiant packets, etc.)"_ Empty → Haiku 4.5 (~$0.05/record). Filled → Sonnet 4.6 (~$0.20/record), with the description added to the prompt as disambiguation context. The lawyer already knows what's unusual; asking is cheaper than guessing.
+- [ ] **Confidence-based escalation.** Even on the Haiku path, if any item comes back below a confidence threshold, retry that document on Sonnet 4.6 before falling back to manual review. Two-tier model use, automatic.
 - [ ] **GUI integration** — when AI returns high-confidence results across the board, skip the review cards entirely. Surface only items Claude flagged as uncertain.
 - [ ] **Fallback path** — if API call fails (offline, key invalid, $20 cap hit), fall back to regex detector silently with a status-bar note.
 
-**Out of scope for Phase 2:** running our own backend, subscription billing, multi-user auth. Embedded API key + $20 cap is the threat model.
+**Out of scope for Phase 2:** running our own backend, subscription billing, multi-user auth, Opus/Mythos for any case. Embedded API key + $20 cap + Haiku/Sonnet only is the threat model.
 
 ## Phase 3 — Tree-based review UI
 
