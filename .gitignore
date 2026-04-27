@@ -5,3 +5,8 @@ __pycache__/
 # Never commit PDFs or bookmark TOMLs — these are real client matters.
 *.pdf
 *.bookmarks*.toml
+
+# PyInstaller / Inno Setup build artifacts
+build/
+dist/
+installers/
